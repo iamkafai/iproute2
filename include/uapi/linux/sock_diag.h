@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
-#ifndef __SOCK_DIAG_H__
-#define __SOCK_DIAG_H__
+#ifndef _UAPI__SOCK_DIAG_H__
+#define _UAPI__SOCK_DIAG_H__
 
 #include <linux/types.h>
 
@@ -36,4 +36,30 @@ enum sknetlink_groups {
 };
 #define SKNLGRP_MAX	(__SKNLGRP_MAX - 1)
 
-#endif /* __SOCK_DIAG_H__ */
+enum {
+	SK_DIAG_BPF_STORAGE_REQ_NONE,
+	SK_DIAG_BPF_STORAGE_REQ_MAP_FD,
+	__SK_DIAG_BPF_STORAGE_REQ_MAX,
+};
+
+#define SK_DIAG_BPF_STORAGE_REQ_MAX	(__SK_DIAG_BPF_STORAGE_REQ_MAX - 1)
+
+enum {
+	SK_DIAG_BPF_STORAGE_REP_NONE,
+	SK_DIAG_BPF_STORAGE,
+	__SK_DIAG_BPF_STORAGE_REP_MAX,
+};
+
+#define SK_DIAB_BPF_STORAGE_REP_MAX	(__SK_DIAG_BPF_STORAGE_REP_MAX - 1)
+
+enum {
+	SK_DIAG_BPF_STORAGE_NONE,
+	SK_DIAG_BPF_STORAGE_PAD,
+	SK_DIAG_BPF_STORAGE_MAP_ID,
+	SK_DIAG_BPF_STORAGE_MAP_VALUE,
+	__SK_DIAG_BPF_STORAGE_MAX,
+};
+
+#define SK_DIAG_BPF_STORAGE_MAX        (__SK_DIAG_BPF_STORAGE_MAX - 1)
+
+#endif /* _UAPI__SOCK_DIAG_H__ */

@@ -53,6 +53,10 @@
 #include <linux/tipc_netlink.h>
 #include <linux/tipc_sockets_diag.h>
 #include <linux/tls.h>
+#define HAVE_LIBBPF
+#ifdef HAVE_LIBBPF
+#include <bpf/bpf.h>
+#endif
 
 /* AF_VSOCK/PF_VSOCK is only provided since glibc 2.18 */
 #ifndef PF_VSOCK
@@ -3109,6 +3113,181 @@ static void parse_diag_msg(struct nlmsghdr *nlh, struct sockstat *s)
 	memcpy(s->remote.data, r->id.idiag_dst, s->local.bytelen);
 }
 
+#ifdef HAVE_LIBBPF
+
+#define MAX_NR_BPF_MAP_ID_OPTS 32
+static struct bpf_map_opts {
+	unsigned int nr_maps;
+	unsigned int ids[MAX_NR_BPF_MAP_ID_OPTS];
+	int fds[MAX_NR_BPF_MAP_ID_OPTS];
+	bool show_all;
+} bpf_map_opts;
+
+static void bpf_map_opts_close_fd(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < bpf_map_opts.nr_maps; i++)
+		close(bpf_map_opts.fds[i]);
+}
+
+static void bpf_map_opts_mixed_error(void)
+{
+	fprintf(stderr,
+		"--bpf-maps and --bpf-map-id cannot be used together\n");
+}
+
+static int bpf_map_opts_add_all(void)
+{
+	if (bpf_map_opts.nr_maps) {
+		bpf_map_opts_mixed_error();
+		return -1;
+	}
+
+	bpf_map_opts.show_all = true;
+	return 0;
+}
+
+static int bpf_map_opts_add_id(const char *optarg)
+{
+	size_t optarg_len;
+	unsigned long id;
+	unsigned int i;
+	char *end;
+	int fd;
+
+	if (bpf_map_opts.show_all) {
+		bpf_map_opts_mixed_error();
+		return -1;
+	}
+
+	optarg_len = strlen(optarg);
+	id = strtoul(optarg, &end, 0);
+	if (end != optarg + optarg_len || id == 0 || id > UINT32_MAX) {
+		fprintf(stderr, "Invalid bpf_map id %s\n", optarg);
+		return -1;
+	}
+
+
+	for (i = 0; i < bpf_map_opts.nr_maps; i++) {
+		if (bpf_map_opts.ids[i] == id)
+			return 0;
+	}
+
+	if (bpf_map_opts.nr_maps == MAX_NR_BPF_MAP_ID_OPTS) {
+		fprintf(stderr, "Too many (> %u) --bpf-map-id options\n",
+			MAX_NR_BPF_MAP_ID_OPTS);
+		return -1;
+	}
+
+	fd = bpf_map_get_fd_by_id(id);
+	if (fd == -1) {
+		fprintf(stderr, "Cannot get bpf_map fd from id %s\n", optarg);
+		return -1;
+	}
+
+	bpf_map_opts.ids[bpf_map_opts.nr_maps] = id;
+	bpf_map_opts.fds[bpf_map_opts.nr_maps++] = fd;
+
+	return 0;
+}
+
+static bool bpf_map_opts_is_enabled(void)
+{
+	return bpf_map_opts.show_all || bpf_map_opts.nr_maps;
+}
+
+static struct rtattr *bpf_map_opts_alloc_rta(void)
+{
+	size_t total_size = RTA_LENGTH(0);
+	struct rtattr *stgs_rta, *fd_rta;
+	unsigned int i;
+	void *buf;
+
+	total_size += RTA_LENGTH(sizeof(int)) * bpf_map_opts.nr_maps;
+	buf = malloc(total_size);
+	if (!buf)
+		return NULL;
+
+	stgs_rta = buf;
+	stgs_rta->rta_type = INET_DIAG_REQ_SK_BPF_STORAGES | NLA_F_NESTED;
+
+	buf += RTA_LENGTH(0);
+	for (i = 0; i < bpf_map_opts.nr_maps; i++) {
+		int *fd;
+
+		fd_rta = buf;
+		fd_rta->rta_type = SK_DIAG_BPF_STORAGE_REQ_MAP_FD;
+		fd_rta->rta_len = RTA_LENGTH(sizeof(int));
+
+		fd = RTA_DATA(fd_rta);
+		*fd = bpf_map_opts.fds[i];
+		buf += fd_rta->rta_len;
+	}
+
+	stgs_rta->rta_len = RTA_LENGTH(RTA_LENGTH(4) * bpf_map_opts.nr_maps);
+
+	return stgs_rta;
+}
+
+static void out_hex(const __u8 *data, size_t len)
+{
+	size_t saved_len = len;
+	size_t i = 0;
+
+	if (!len)
+		return;
+
+	if (saved_len > 32)
+		len = 32;
+
+	for (i = 0; i < len / 2; i++) {
+		out(" %02x%02x", data[0], data[1]);
+		data += 2;
+	}
+
+	if (len % 2)
+		out( " %02x", data[0]);
+
+	if (saved_len > 32)
+		out("... total:%zu", saved_len);
+}
+
+static void show_sk_bpf_storages(struct rtattr *bpf_stgs)
+{
+	struct rtattr *tb[SK_DIAG_BPF_STORAGE_MAX+1], *bpf_stg;
+	unsigned int rem, map_id;
+	struct rtattr *value;
+
+
+	for (bpf_stg = RTA_DATA(bpf_stgs), rem = RTA_PAYLOAD(bpf_stgs);
+	     RTA_OK(bpf_stg, rem);
+	     bpf_stg = RTA_NEXT(bpf_stg, rem)) {
+	    	if ((bpf_stg->rta_type & NLA_TYPE_MASK) != SK_DIAG_BPF_STORAGE)
+			continue;
+
+		parse_rtattr_nested(tb, SK_DIAG_BPF_STORAGE_MAX,
+				    (struct rtattr *)bpf_stg);
+		if (tb[SK_DIAG_BPF_STORAGE_MAP_ID]) {
+			if (!oneline)
+				out("\n\t");
+			map_id = rta_getattr_u32(tb[SK_DIAG_BPF_STORAGE_MAP_ID]);
+			out(" bpf_map_id:%u", map_id);
+
+			value = tb[SK_DIAG_BPF_STORAGE_MAP_VALUE];
+			if (value) {
+				out(" value:[");
+				out_hex(RTA_DATA(value), RTA_PAYLOAD(value));
+				out(" ]");
+			}
+			if (oneline)
+				out(",");
+		}
+	}
+}
+
+#endif
+
 static int inet_show_sock(struct nlmsghdr *nlh,
 			  struct sockstat *s)
 {
@@ -3116,8 +3295,9 @@ static int inet_show_sock(struct nlmsghdr *nlh,
 	struct inet_diag_msg *r = NLMSG_DATA(nlh);
 	unsigned char v6only = 0;
 
-	parse_rtattr(tb, INET_DIAG_MAX, (struct rtattr *)(r+1),
-		     nlh->nlmsg_len - NLMSG_LENGTH(sizeof(*r)));
+	parse_rtattr_flags(tb, INET_DIAG_MAX, (struct rtattr *)(r+1),
+			   nlh->nlmsg_len - NLMSG_LENGTH(sizeof(*r)),
+			   NLA_F_NESTED);
 
 	if (tb[INET_DIAG_PROTOCOL])
 		s->type = rta_getattr_u8(tb[INET_DIAG_PROTOCOL]);
@@ -3171,6 +3351,9 @@ static int inet_show_sock(struct nlmsghdr *nlh,
 			tcp_show_info(nlh, r, tb);
 	}
 	sctp_ino = s->ino;
+
+	if (tb[INET_DIAG_SK_BPF_STORAGES])
+		show_sk_bpf_storages(tb[INET_DIAG_SK_BPF_STORAGES]);
 
 	return 0;
 }
@@ -3253,11 +3436,11 @@ static int sockdiag_send(int family, int fd, int protocol, struct filter *f)
 {
 	struct sockaddr_nl nladdr = { .nl_family = AF_NETLINK };
 	DIAG_REQUEST(req, struct inet_diag_req_v2 r);
+	struct rtattr rta, *bpf_stgs_rta = NULL;
 	char    *bc = NULL;
 	int	bclen;
 	struct msghdr msg;
-	struct rtattr rta;
-	struct iovec iov[3];
+	struct iovec iov[4];
 	int iovlen = 1;
 
 	if (family == PF_UNSPEC)
@@ -3292,11 +3475,22 @@ static int sockdiag_send(int family, int fd, int protocol, struct filter *f)
 		if (bclen) {
 			rta.rta_type = INET_DIAG_REQ_BYTECODE;
 			rta.rta_len = RTA_LENGTH(bclen);
-			iov[1] = (struct iovec){ &rta, sizeof(rta) };
-			iov[2] = (struct iovec){ bc, bclen };
+			iov[iovlen++] = (struct iovec){ &rta, sizeof(rta) };
+			iov[iovlen++] = (struct iovec){ bc, bclen };
 			req.nlh.nlmsg_len += RTA_LENGTH(bclen);
-			iovlen = 3;
 		}
+	}
+
+	if (bpf_map_opts_is_enabled()) {
+		bpf_stgs_rta = bpf_map_opts_alloc_rta();
+		if (!bpf_stgs_rta) {
+			fprintf(stderr, "Cannot alloc request for --bpf-map\n");
+			return -1;
+		}
+
+		iov[iovlen++] = (struct iovec){ bpf_stgs_rta,
+						bpf_stgs_rta->rta_len };
+		req.nlh.nlmsg_len += bpf_stgs_rta->rta_len;
 	}
 
 	msg = (struct msghdr) {
@@ -3307,10 +3501,12 @@ static int sockdiag_send(int family, int fd, int protocol, struct filter *f)
 	};
 
 	if (sendmsg(fd, &msg, 0) < 0) {
+		free(bpf_stgs_rta);
 		close(fd);
 		return -1;
 	}
 
+	free(bpf_stgs_rta);
 	return 0;
 }
 
@@ -4988,6 +5184,8 @@ static void _usage(FILE *dest)
 "   -s, --summary       show socket usage summary\n"
 "       --tos           show tos and priority information\n"
 "   -b, --bpf           show bpf filter socket information\n"
+"       --bpf-maps      show all bpf sk storage maps\n"
+"       --bpf-map-id=MAP-ID    show a bpf sk storage maps\n"
 "   -E, --events        continually display sockets as they are destroyed\n"
 "   -Z, --context       display process SELinux security contexts\n"
 "   -z, --contexts      display process and socket SELinux security contexts\n"
@@ -5097,6 +5295,9 @@ static int scan_state(const char *state)
 /* Values of 'x' are already used so a non-character is used */
 #define OPT_XDPSOCK 260
 
+#define OPT_BPF_MAPS 261
+#define OPT_BPF_MAP_ID 262
+
 static const struct option long_opts[] = {
 	{ "numeric", 0, 0, 'n' },
 	{ "resolve", 0, 0, 'r' },
@@ -5137,6 +5338,10 @@ static const struct option long_opts[] = {
 	{ "no-header", 0, 0, 'H' },
 	{ "xdp", 0, 0, OPT_XDPSOCK},
 	{ "oneline", 0, 0, 'O' },
+#ifdef HAVE_LIBBPF
+	{ "bpf-maps", 0, 0, OPT_BPF_MAPS},
+	{ "bpf-map-id", 1, 0, OPT_BPF_MAP_ID},
+#endif
 	{ 0 }
 
 };
@@ -5320,6 +5525,16 @@ int main(int argc, char *argv[])
 		case OPT_TOS:
 			show_tos = 1;
 			break;
+#ifdef HAVE_LIBBPF
+		case OPT_BPF_MAPS:
+			if (bpf_map_opts_add_all())
+				exit(1);
+			break;
+		case OPT_BPF_MAP_ID:
+			if (bpf_map_opts_add_id(optarg))
+				exit(1);
+			break;
+#endif
 		case 'K':
 			current_filter.kill = 1;
 			break;

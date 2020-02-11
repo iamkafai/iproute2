@@ -382,8 +382,8 @@ fi
 echo -n "libc has setns: "
 check_setns
 
-echo -n "SELinux support: "
-check_selinux
+#echo -n "SELinux support: "
+#check_selinux
 
 echo -n "ELF support: "
 check_elf

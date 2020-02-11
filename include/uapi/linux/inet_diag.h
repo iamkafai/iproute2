@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
-#ifndef _INET_DIAG_H_
-#define _INET_DIAG_H_
+#ifndef _UAPI_INET_DIAG_H_
+#define _UAPI_INET_DIAG_H_
 
 #include <linux/types.h>
 
@@ -64,9 +64,11 @@ struct inet_diag_req_raw {
 enum {
 	INET_DIAG_REQ_NONE,
 	INET_DIAG_REQ_BYTECODE,
+	INET_DIAG_REQ_SK_BPF_STORAGES,
+	__INET_DIAG_REQ_MAX,
 };
 
-#define INET_DIAG_REQ_MAX INET_DIAG_REQ_BYTECODE
+#define INET_DIAG_REQ_MAX (__INET_DIAG_REQ_MAX - 1)
 
 /* Bytecode is sequence of 4 byte commands followed by variable arguments.
  * All the commands identified by "code" are conditional jumps forward:
@@ -154,6 +156,7 @@ enum {
 	INET_DIAG_CLASS_ID,	/* request as INET_DIAG_TCLASS */
 	INET_DIAG_MD5SIG,
 	INET_DIAG_ULP_INFO,
+	INET_DIAG_SK_BPF_STORAGES,
 	__INET_DIAG_MAX,
 };
 
@@ -211,4 +214,4 @@ union tcp_cc_info {
 	struct tcp_dctcp_info	dctcp;
 	struct tcp_bbr_info	bbr;
 };
-#endif /* _INET_DIAG_H_ */
+#endif /* _UAPI_INET_DIAG_H_ */

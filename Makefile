@@ -52,13 +52,18 @@ CCOPTS = -O2 -pipe
 WFLAGS := -Wall -Wstrict-prototypes  -Wmissing-prototypes
 WFLAGS += -Wmissing-declarations -Wold-style-definition -Wformat=2
 
-CFLAGS := $(WFLAGS) $(CCOPTS) -I../include -I../include/uapi $(DEFINES) $(CFLAGS)
+CFLAGS := $(WFLAGS) $(CCOPTS) -I../include -I../include/uapi $(DEFINES) $(CFLAGS) -g
 YACCFLAGS = -d -t -v
 
 SUBDIRS=lib ip tc bridge misc netem genl tipc devlink rdma man
 
 LIBNETLINK=../lib/libutil.a ../lib/libnetlink.a
 LDLIBS += $(LIBNETLINK)
+
+LIBBPF=/home/kafai/fb-kernel/linux/tools/lib/bpf/libbpf.a
+LDFLAGS += -lz
+LDLIBS += $(LIBBPF)
+CFLAGS := $(CFLAGS) -I/home/kafai/fb-kernel/linux/tools/lib
 
 all: config.mk
 	@set -e; \
